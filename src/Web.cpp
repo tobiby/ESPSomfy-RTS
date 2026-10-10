@@ -1519,6 +1519,7 @@ void Web::begin() {
       if(!obj["roomId"].isNull()) {
         SomfyRoom* room = somfy.getRoomById(obj["roomId"]);
         if(room) {
+          SomfyLock lock;
           room->fromJSON(obj);
           room->save();
           AsyncJsonResp resp;
@@ -1541,6 +1542,7 @@ void Web::begin() {
       if(!obj["shadeId"].isNull()) {
         SomfyShade* shade = somfy.getShadeById(obj["shadeId"]);
         if(shade) {
+          SomfyLock lock; // Config change from the web server task.
           int8_t err = shade->fromJSON(obj);
           if(err == 0) {
             shade->save();
@@ -1569,6 +1571,7 @@ void Web::begin() {
       if(!obj["groupId"].isNull()) {
         SomfyGroup* group = somfy.getGroupById(obj["groupId"]);
         if(group) {
+          SomfyLock lock;
           group->fromJSON(obj);
           group->save();
           AsyncJsonResp resp;
@@ -2472,13 +2475,13 @@ void Web::begin() {
     JsonObject obj = doc.to<JsonObject>();
     settings.toJSON(obj);
     obj["fwVersion"] = settings.fwVersion.name;
-    JsonObject eth = obj.createNestedObject("ethernet");
+    JsonObject eth = obj["ethernet"].to<JsonObject>();
 #ifndef CONFIG_IDF_TARGET_ESP32C6
     settings.Ethernet.toJSON(eth);
 #endif
-    JsonObject wifi = obj.createNestedObject("wifi");
+    JsonObject wifi = obj["wifi"].to<JsonObject>();
     settings.WIFI.toJSON(wifi);
-    JsonObject ip = obj.createNestedObject("ip");
+    JsonObject ip = obj["ip"].to<JsonObject>();
     settings.IP.toJSON(ip);
     serializeJson(doc, g_async_content, sizeof(g_async_content));
     request->send(200, _encoding_json, g_async_content);

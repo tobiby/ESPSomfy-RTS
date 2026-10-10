@@ -12,6 +12,22 @@
 #include "MQTT.h"
 #include "ConfigFile.h"
 #include "GitOTA.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+static SemaphoreHandle_t g_somfyMutex = nullptr;
+void SomfyLock::init() {
+  if(!g_somfyMutex) g_somfyMutex = xSemaphoreCreateRecursiveMutex();
+}
+SomfyLock::SomfyLock() {
+  if(!g_somfyMutex) return;
+  // Bounded wait so a stuck holder can never trip the task watchdog of the waiter.
+  this->m_locked = xSemaphoreTakeRecursive(g_somfyMutex, pdMS_TO_TICKS(5000)) == pdTRUE;
+  if(!this->m_locked) ESP_LOGE("SomfyLock", "Timeout waiting for somfy lock - continuing unlocked");
+}
+SomfyLock::~SomfyLock() {
+  if(this->m_locked) xSemaphoreGiveRecursive(g_somfyMutex);
+}
 
 static const char *TAG = "Somfy";
 
@@ -603,6 +619,7 @@ bool SomfyShadeController::begin() {
 }
 void SomfyShadeController::commit() {
   if(git.lockFS) return;
+  SomfyLock lock;
   esp_task_wdt_reset(); // Make sure we don't reset inadvertently.
   ShadeConfigFile file;
   file.begin();
@@ -699,6 +716,7 @@ void SomfyGroup::clear() {
   memset(&this->linkedShades, 0x00, sizeof(this->linkedShades));
 }
 bool SomfyShade::linkRemote(uint32_t address, uint16_t rollingCode) {
+  SomfyLock lock;
   // Check to see if the remote is already linked. If it is
   // just return true after setting the rolling code
   for(uint8_t i = 0; i < SOMFY_MAX_LINKED_REMOTES; i++) {
@@ -790,6 +808,7 @@ void SomfyShade::commitTiltPosition() {
   #endif
 }
 bool SomfyShade::unlinkRemote(uint32_t address) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_LINKED_REMOTES; i++) {
     if(this->linkedRemotes[i].getRemoteAddress() == address) {
       this->linkedRemotes[i].setRemoteAddress(0);
@@ -1445,11 +1464,11 @@ void SomfyShade::publishDisco() {
   JsonObject obj = doc.to<JsonObject>();
   snprintf(topic, sizeof(topic), "%s/shades/%d", settings.MQTT.rootTopic, this->shadeId);
   obj["~"] = topic;
-  JsonObject dobj = obj.createNestedObject("device");
+  JsonObject dobj = obj["device"].to<JsonObject>();
   dobj["hw_version"] = settings.fwVersion.name;
   dobj["name"] = settings.hostname;
   dobj["mf"] = "rstrouse";
-  JsonArray arrids = dobj.createNestedArray("identifiers");
+  JsonArray arrids = dobj["identifiers"].to<JsonArray>();
   //snprintf(topic, sizeof(topic), "mqtt_espsomfyrts_%s_shade%d", settings.serverId, this->shadeId);
   snprintf(topic, sizeof(topic), "mqtt_espsomfyrts_%s", settings.serverId);
   arrids.add(topic);
@@ -3047,6 +3066,7 @@ void SomfyShade::moveToTarget(float pos, float tilt) {
   }
 }
 bool SomfyShade::save() {
+  SomfyLock lock;
   #ifdef USE_NVS
   if(somfy.useNVS()) {
     char shadeKey[15];
@@ -3271,7 +3291,8 @@ int8_t SomfyShade::fromJSON(JsonObject &obj) {
         this->linkedRemotes[j].setRemoteAddress(linkedAddresses[j]);
       }
     }
-    if(!obj["flags"].isNull()) this->flags = obj["flags"];
+    // Configured flags come from the client, live sensor state (wind/sun/demo) stays as received.
+    if(!obj["flags"].isNull()) this->flags = (obj["flags"].as<uint8_t>() & ~SOMFY_TRANSIENT_FLAGS) | (this->flags & SOMFY_TRANSIENT_FLAGS);
     if(this->proto == radio_proto::GP_Remote || this->proto == radio_proto::GP_Relay) {
       if(!obj["gpioUp"].isNull()) this->gpioUp = obj["gpioUp"];
       if(!obj["gpioDown"].isNull()) this->gpioDown = obj["gpioDown"];
@@ -3328,11 +3349,11 @@ bool SomfyShade::toJSON(JsonObject &obj) {
   obj["gpioMy"] = this->gpioMy;
   obj["gpioLLTrigger"] = ((this->gpioFlags & (uint8_t)gpio_flags_t::LowLevelTrigger) == 0) ? false : true;
   SomfyRemote::toJSON(obj);
-  JsonArray arr = obj.createNestedArray("linkedRemotes");
+  JsonArray arr = obj["linkedRemotes"].to<JsonArray>();
   for(uint8_t i = 0; i < SOMFY_MAX_LINKED_REMOTES; i++) {
     SomfyLinkedRemote &lremote = this->linkedRemotes[i];
     if(lremote.getRemoteAddress() != 0) {
-      JsonObject lro = arr.createNestedObject();
+      JsonObject lro = arr.add<JsonObject>();
       lremote.toJSON(lro);
     }
   }
@@ -3389,13 +3410,13 @@ bool SomfyGroup::toJSON(JsonObject &obj) {
   obj["repeats"] = this->repeats;
   obj["sortOrder"] = this->sortOrder;
   SomfyRemote::toJSON(obj);
-  JsonArray arr = obj.createNestedArray("linkedShades");
+  JsonArray arr = obj["linkedShades"].to<JsonArray>();
   for(uint8_t i = 0; i < SOMFY_MAX_GROUPED_SHADES; i++) {
     uint8_t shadeId = this->linkedShades[i];
     if(shadeId > 0 && shadeId < 255) {
       SomfyShade *shade = somfy.getShadeById(shadeId);
       if(shade) {
-        JsonObject lsd = arr.createNestedObject();
+        JsonObject lsd = arr.add<JsonObject>();
         shade->toJSONRef(lsd);
       }
     }
@@ -3415,6 +3436,7 @@ bool SomfyRemote::toJSON(JsonObject &obj) {
 void SomfyRemote::setRemoteAddress(uint32_t address) { this->m_remoteAddress = address; snprintf(this->m_remotePrefId, sizeof(this->m_remotePrefId), "_%lu", (unsigned long)this->m_remoteAddress); }
 uint32_t SomfyRemote::getRemoteAddress() { return this->m_remoteAddress; }
 void SomfyShadeController::processFrame(somfy_frame_t &frame, bool internal) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_SHADES; i++) {
     if(this->shades[i].getShadeId() != 255) this->shades[i].processFrame(frame, internal);
   }
@@ -3595,6 +3617,7 @@ uint32_t SomfyShadeController::getNextRemoteAddress(uint8_t id) {
   return address;
 }
 SomfyShade *SomfyShadeController::addShade(JsonObject &obj) {
+  SomfyLock lock;
   SomfyShade *shade = this->addShade();
   if(shade) {
     shade->fromJSON(obj);
@@ -3604,6 +3627,7 @@ SomfyShade *SomfyShadeController::addShade(JsonObject &obj) {
   return shade;
 }
 SomfyShade *SomfyShadeController::addShade() {
+  SomfyLock lock;
   uint8_t shadeId = this->getNextShadeId();
   // So the next shade id will be the first one we run into with an id of 255 so
   // if it gets deleted in the middle then it will get the first slot that is empty.
@@ -3673,6 +3697,7 @@ SomfyShade *SomfyShadeController::addShade() {
   return shade;
 }
 bool SomfyShadeController::unlinkRepeater(uint32_t address) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_REPEATERS; i++) {
     if(this->repeaters[i] == address) this->repeaters[i] = 0;
   }
@@ -3681,6 +3706,7 @@ bool SomfyShadeController::unlinkRepeater(uint32_t address) {
   return true;  
 }
 bool SomfyShadeController::linkRepeater(uint32_t address) {
+  SomfyLock lock;
   bool bSet = false;
   for(uint8_t i = 0; i < SOMFY_MAX_REPEATERS; i++) {
     if(!bSet && this->repeaters[i] == address) bSet = true;
@@ -3764,6 +3790,7 @@ somfy_commands SomfyRemote::transformCommand(somfy_commands cmd) {
   return cmd;
 }
 void SomfyRemote::sendSensorCommand(int8_t isWindy, int8_t isSunny, uint8_t repeat) {
+  SomfyLock lock;
   uint8_t flags = (this->flags >> 4) & 0x0F;
   if(isWindy > 0) flags |= 0x01;
   if(isSunny > 0) flags |= 0x02;
@@ -3786,7 +3813,18 @@ void SomfyRemote::sendSensorCommand(int8_t isWindy, int8_t isSunny, uint8_t repe
 }
 void SomfyRemote::sendCommand(somfy_commands cmd) { this->sendCommand(cmd, this->repeats); }
 void SomfyRemote::sendCommand(somfy_commands cmd, uint8_t repeat, uint8_t stepSize) {
-  this->lastFrame.rollingCode = this->getNextRollingCode();
+  // Hold the lock for the whole command so the rolling code increment, the transmission and
+  // the frame processing cannot interleave with another task.
+  SomfyLock lock;
+  const uint16_t rollingCode = this->getNextRollingCode();
+  if(rollingCode == 0) {
+    // Never transmit code 0 (or a reset counter): the motor would ignore it and the stored
+    // rolling code would no longer match. getNextRollingCode() already logged the cause.
+    ESP_LOGE(TAG, "CMD:%s ADDR:%d not sent - no valid rolling code",
+        translateSomfyCommand(this->transformCommand(cmd)).c_str(), this->getRemoteAddress());
+    return;
+  }
+  this->lastFrame.rollingCode = rollingCode;
   this->lastFrame.remoteAddress = this->getRemoteAddress();
   this->lastFrame.cmd = this->transformCommand(cmd);
   this->lastFrame.repeats = repeat;
@@ -3797,7 +3835,6 @@ void SomfyRemote::sendCommand(somfy_commands cmd, uint8_t repeat, uint8_t stepSi
   this->lastFrame.encKey = 0xA0 | static_cast<uint8_t>(this->lastFrame.rollingCode & 0x000F);
   this->lastFrame.proto = this->proto;
   if(this->lastFrame.bitLength == 0) this->lastFrame.bitLength = bit_length;
-  if(this->lastFrame.rollingCode == 0) ESP_LOGE(TAG, "Setting rcode to 0");
   this->p_lastRollingCode(this->lastFrame.rollingCode);
   // We have to set the processed to clear this if we are sending
   // another command.
@@ -3829,6 +3866,7 @@ bool SomfyRemote::isLastCommand(somfy_commands cmd) {
   return true;
 }
 void SomfyRemote::repeatFrame(uint8_t repeat) {
+  SomfyLock lock;
   if(this->proto == radio_proto::GP_Relay)
     return;
   else if(this->proto == radio_proto::GP_Remote) {
@@ -3850,6 +3888,7 @@ void SomfyRemote::repeatFrame(uint8_t repeat) {
   //somfy.processFrame(this->lastFrame, true);
 }
 void SomfyShadeController::sendFrame(somfy_frame_t &frame, uint8_t repeat) {
+  SomfyLock lock;
   somfy.transceiver.beginTransmit();
   byte frm[10];
   frame.encodeFrame(frm);
@@ -3864,6 +3903,7 @@ void SomfyShadeController::sendFrame(somfy_frame_t &frame, uint8_t repeat) {
   this->transceiver.endTransmit();
 }
 bool SomfyShadeController::deleteShade(uint8_t shadeId) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_SHADES; i++) {
     if(this->shades[i].getShadeId() == shadeId) {
       shades[i].emitState("shadeRemoved");
@@ -3928,12 +3968,27 @@ bool SomfyShadeController::deleteGroup(uint8_t groupId) {
 
 bool SomfyShadeController::loadShadesFile(const char *filename) { return ShadeConfigFile::load(this, filename); }
 uint16_t SomfyRemote::getNextRollingCode() {
+  // Do not advance the rolling code while the radio is not initialized: nothing is
+  // transmitted, so the stored code would drift ahead of the motor and desync the remote.
+  // (upstream PR rstrouse/ESPSomfy-RTS#679)
+  if(!somfy.transceiver.config.radioInit) {
+    ESP_LOGW(TAG, "Radio not initialized - rolling code NOT incremented");
+    return this->lastRollingCode > 0 ? this->lastRollingCode : 1;
+  }
+  SomfyLock lock; // The global Preferences object is shared with other NVS users.
   if(!pref.begin("ShadeCodes")) {
-    ESP_LOGE(TAG, "getNextRollingCode() pref.begin(ShadeCodes) FAILED");
+    // Without NVS we would read 0 and transmit code 1, desyncing the remote. Refuse instead.
+    ESP_LOGE(TAG, "getNextRollingCode() pref.begin(ShadeCodes) FAILED - command not sent");
+    return 0;
   }
   uint16_t code = pref.getUShort(this->m_remotePrefId, 0);
   code++;
-  pref.putUShort(this->m_remotePrefId, code);
+  if(code == 0) code = 1; // 16-bit wrap: 0 is never a valid rolling code.
+  if(pref.putUShort(this->m_remotePrefId, code) == 0) {
+    pref.end();
+    ESP_LOGE(TAG, "getNextRollingCode() failed to persist rolling code %u - command not sent", code);
+    return 0;
+  }
   pref.end();
   this->p_lastRollingCode(code);
   //Serial.printf("Getting Next Rolling code %d\n", this->lastRollingCode);
@@ -3945,6 +4000,7 @@ uint16_t SomfyRemote::p_lastRollingCode(uint16_t code) {
   return old;
 }
 uint16_t SomfyRemote::setRollingCode(uint16_t code) {
+  SomfyLock lock;
   if(this->lastRollingCode != code) {
     pref.begin("ShadeCodes");
     pref.putUShort(this->m_remotePrefId, code);
@@ -3963,13 +4019,13 @@ bool SomfyShadeController::toJSON(DynamicJsonDocument &doc) {
   doc["maxGroupedShades"] = SOMFY_MAX_GROUPED_SHADES;
   doc["maxLinkedRemotes"] = SOMFY_MAX_LINKED_REMOTES;
   doc["startingAddress"] = this->startingAddress;
-  JsonObject objRadio = doc.createNestedObject("transceiver");
+  JsonObject objRadio = doc["transceiver"].to<JsonObject>();
   this->transceiver.toJSON(objRadio);
-  JsonArray arrRooms = doc.createNestedArray("rooms");
+  JsonArray arrRooms = doc["rooms"].to<JsonArray>();
   this->toJSONRooms(arrRooms);
-  JsonArray arrShades = doc.createNestedArray("shades");
+  JsonArray arrShades = doc["shades"].to<JsonArray>();
   this->toJSONShades(arrShades);
-  JsonArray arrGroups = doc.createNestedArray("groups");
+  JsonArray arrGroups = doc["groups"].to<JsonArray>();
   this->toJSONGroups(arrGroups);
   return true;
 }
@@ -3977,11 +4033,11 @@ bool SomfyShadeController::toJSON(JsonObject &obj) {
   obj["maxShades"] = SOMFY_MAX_SHADES;
   obj["maxLinkedRemotes"] = SOMFY_MAX_LINKED_REMOTES;
   obj["startingAddress"] = this->startingAddress;
-  JsonObject oradio = obj.createNestedObject("transceiver");
+  JsonObject oradio = obj["transceiver"].to<JsonObject>();
   this->transceiver.toJSON(oradio);
-  JsonArray arrShades = obj.createNestedArray("shades");
+  JsonArray arrShades = obj["shades"].to<JsonArray>();
   this->toJSONShades(arrShades);
-  JsonArray arrGroups = obj.createNestedArray("groups");
+  JsonArray arrGroups = obj["groups"].to<JsonArray>();
   this->toJSONGroups(arrGroups);
   return true;
 }
@@ -3991,7 +4047,7 @@ bool SomfyShadeController::toJSONShades(JsonArray &arr) {
   for(uint8_t i = 0; i < SOMFY_MAX_SHADES; i++) {
     SomfyShade &shade = this->shades[i];
     if(shade.getShadeId() != 255) {
-      JsonObject oshade = arr.createNestedObject();
+      JsonObject oshade = arr.add<JsonObject>();
       shade.toJSON(oshade);
     }
   }
@@ -4001,7 +4057,7 @@ bool SomfyShadeController::toJSONGroups(JsonArray &arr) {
   for(uint8_t i = 0; i < SOMFY_MAX_GROUPS; i++) {
     SomfyGroup &group = this->groups[i];
     if(group.getGroupId() != 255) {
-      JsonObject ogroup = arr.createNestedObject();
+      JsonObject ogroup = arr.add<JsonObject>();
       group.toJSON(ogroup);
     }
   }
@@ -4138,6 +4194,11 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
     //delayMicroseconds(9565);
     //delay(80);
   }
+  // Network tasks (WiFi, lwIP, AsyncTCP @ prio 10 on any core) can preempt the loop task
+  // mid-frame and delay an edge enough to corrupt the frame. Bump the priority until the
+  // last data bit, then restore it. (upstream PR rstrouse/ESPSomfy-RTS#690)
+  const UBaseType_t txPriority = uxTaskPriorityGet(NULL);
+  vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
   // Depending on the bitness of the protocol we will be sending a different hwsync.
   // 56-bit 2 pulses for the first frame and 7 for the repeats
   // 80-bit 24 pulses for the first frame and 14 pulses for the repeats
@@ -4172,6 +4233,7 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
       last_bit = 0;
     }
   }
+  vTaskPrioritySet(NULL, txPriority);
   // End with a 0 no matter what.  This accommodates the 56-bit protocol by telling the
   // motor that there are no more follow on bits.
   if(last_bit == 0) {
@@ -4515,7 +4577,7 @@ void Transceiver::disableReceive(void) {
 /*
 bool Transceiver::toJSON(JsonObject& obj) {
     //Serial.println("Setting Transceiver Json");
-    JsonObject objConfig = obj.createNestedObject("config");
+    JsonObject objConfig = obj["config"].to<JsonObject>();
     this->config.toJSON(objConfig);
     return true;
 }
@@ -4782,14 +4844,28 @@ void transceiver_config_t::apply() {
     somfy.transceiver.disableReceive();
     bit_length = this->type;    
     if(this->enabled) {
-      bool radioInit = true;
       pref.begin("CC1101");
-      radioInit = pref.getBool("radioInit", true);
-      // If the radio locks up then we can simply reboot and re-enable the radio.
-      pref.putBool("radioInit", false);
+      bool radioInit = pref.getBool("radioInit", true);
+      uint8_t initCrashes = pref.getUChar("initCrashes", 0);
+      // If a previous boot hung during CC1101 init the flag was left false and the original
+      // code skipped radio init on EVERY following boot. Retry up to 3 consecutive times
+      // before giving up. (upstream PR rstrouse/ESPSomfy-RTS#679)
+      if(!radioInit) {
+        initCrashes++;
+        if(initCrashes >= 3) {
+          pref.putUChar("initCrashes", initCrashes);
+          pref.end();
+          this->radioInit = false;
+          ESP_LOGE(TAG, "CC1101 init skipped after %u consecutive crashes - save radio settings to reset", initCrashes);
+          return;
+        }
+        ESP_LOGW(TAG, "CC1101 init did not complete last boot (%u/3), retrying...", initCrashes);
+      }
+      else initCrashes = 0;
+      pref.putUChar("initCrashes", initCrashes);
+      pref.putBool("radioInit", false); // Mark init as in-progress; reset to true once it completes.
       this->radioInit = false;
       pref.end();
-      if(!radioInit) return;
       ESP_LOGD(TAG, "Applying radio settings - Setting Data Pins RX:%u TX:%u", this->RXPin, this->TXPin);
       //if(this->TXPin != this->RXPin)
       //  pinMode(this->TXPin, OUTPUT);
@@ -4847,8 +4923,8 @@ void transceiver_config_t::apply() {
       }
       pref.begin("CC1101");
       pref.putBool("radioInit", true);
+      pref.putUChar("initCrashes", 0); // Init completed - clear the crash counter.
       pref.end();
-      
     }
     else {
       if(this->radioInit) ELECHOUSE_cc1101.setSidle();

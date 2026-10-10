@@ -348,11 +348,11 @@ bool MQTTSettings::load() {
 }
 bool ConfigSettings::toJSON(JsonDocument &doc) {
   doc["fwVersion"] = this->fwVersion.name;
-  JsonObject objWIFI = doc.createNestedObject("WIFI");
+  JsonObject objWIFI = doc["WIFI"].to<JsonObject>();
   this->WIFI.toJSON(objWIFI);
-  JsonObject objNTP = doc.createNestedObject("NTP");
+  JsonObject objNTP = doc["NTP"].to<JsonObject>();
   this->NTP.toJSON(objNTP);
-  JsonObject objMQTT = doc.createNestedObject("MQTT");
+  JsonObject objMQTT = doc["MQTT"].to<JsonObject>();
   this->MQTT.toJSON(objMQTT);
   return true;
 }
