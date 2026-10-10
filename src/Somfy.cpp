@@ -1464,11 +1464,11 @@ void SomfyShade::publishDisco() {
   JsonObject obj = doc.to<JsonObject>();
   snprintf(topic, sizeof(topic), "%s/shades/%d", settings.MQTT.rootTopic, this->shadeId);
   obj["~"] = topic;
-  JsonObject dobj = obj.createNestedObject("device");
+  JsonObject dobj = obj["device"].to<JsonObject>();
   dobj["hw_version"] = settings.fwVersion.name;
   dobj["name"] = settings.hostname;
   dobj["mf"] = "rstrouse";
-  JsonArray arrids = dobj.createNestedArray("identifiers");
+  JsonArray arrids = dobj["identifiers"].to<JsonArray>();
   //snprintf(topic, sizeof(topic), "mqtt_espsomfyrts_%s_shade%d", settings.serverId, this->shadeId);
   snprintf(topic, sizeof(topic), "mqtt_espsomfyrts_%s", settings.serverId);
   arrids.add(topic);
@@ -3349,11 +3349,11 @@ bool SomfyShade::toJSON(JsonObject &obj) {
   obj["gpioMy"] = this->gpioMy;
   obj["gpioLLTrigger"] = ((this->gpioFlags & (uint8_t)gpio_flags_t::LowLevelTrigger) == 0) ? false : true;
   SomfyRemote::toJSON(obj);
-  JsonArray arr = obj.createNestedArray("linkedRemotes");
+  JsonArray arr = obj["linkedRemotes"].to<JsonArray>();
   for(uint8_t i = 0; i < SOMFY_MAX_LINKED_REMOTES; i++) {
     SomfyLinkedRemote &lremote = this->linkedRemotes[i];
     if(lremote.getRemoteAddress() != 0) {
-      JsonObject lro = arr.createNestedObject();
+      JsonObject lro = arr.add<JsonObject>();
       lremote.toJSON(lro);
     }
   }
@@ -3410,13 +3410,13 @@ bool SomfyGroup::toJSON(JsonObject &obj) {
   obj["repeats"] = this->repeats;
   obj["sortOrder"] = this->sortOrder;
   SomfyRemote::toJSON(obj);
-  JsonArray arr = obj.createNestedArray("linkedShades");
+  JsonArray arr = obj["linkedShades"].to<JsonArray>();
   for(uint8_t i = 0; i < SOMFY_MAX_GROUPED_SHADES; i++) {
     uint8_t shadeId = this->linkedShades[i];
     if(shadeId > 0 && shadeId < 255) {
       SomfyShade *shade = somfy.getShadeById(shadeId);
       if(shade) {
-        JsonObject lsd = arr.createNestedObject();
+        JsonObject lsd = arr.add<JsonObject>();
         shade->toJSONRef(lsd);
       }
     }
@@ -4019,13 +4019,13 @@ bool SomfyShadeController::toJSON(DynamicJsonDocument &doc) {
   doc["maxGroupedShades"] = SOMFY_MAX_GROUPED_SHADES;
   doc["maxLinkedRemotes"] = SOMFY_MAX_LINKED_REMOTES;
   doc["startingAddress"] = this->startingAddress;
-  JsonObject objRadio = doc.createNestedObject("transceiver");
+  JsonObject objRadio = doc["transceiver"].to<JsonObject>();
   this->transceiver.toJSON(objRadio);
-  JsonArray arrRooms = doc.createNestedArray("rooms");
+  JsonArray arrRooms = doc["rooms"].to<JsonArray>();
   this->toJSONRooms(arrRooms);
-  JsonArray arrShades = doc.createNestedArray("shades");
+  JsonArray arrShades = doc["shades"].to<JsonArray>();
   this->toJSONShades(arrShades);
-  JsonArray arrGroups = doc.createNestedArray("groups");
+  JsonArray arrGroups = doc["groups"].to<JsonArray>();
   this->toJSONGroups(arrGroups);
   return true;
 }
@@ -4033,11 +4033,11 @@ bool SomfyShadeController::toJSON(JsonObject &obj) {
   obj["maxShades"] = SOMFY_MAX_SHADES;
   obj["maxLinkedRemotes"] = SOMFY_MAX_LINKED_REMOTES;
   obj["startingAddress"] = this->startingAddress;
-  JsonObject oradio = obj.createNestedObject("transceiver");
+  JsonObject oradio = obj["transceiver"].to<JsonObject>();
   this->transceiver.toJSON(oradio);
-  JsonArray arrShades = obj.createNestedArray("shades");
+  JsonArray arrShades = obj["shades"].to<JsonArray>();
   this->toJSONShades(arrShades);
-  JsonArray arrGroups = obj.createNestedArray("groups");
+  JsonArray arrGroups = obj["groups"].to<JsonArray>();
   this->toJSONGroups(arrGroups);
   return true;
 }
@@ -4047,7 +4047,7 @@ bool SomfyShadeController::toJSONShades(JsonArray &arr) {
   for(uint8_t i = 0; i < SOMFY_MAX_SHADES; i++) {
     SomfyShade &shade = this->shades[i];
     if(shade.getShadeId() != 255) {
-      JsonObject oshade = arr.createNestedObject();
+      JsonObject oshade = arr.add<JsonObject>();
       shade.toJSON(oshade);
     }
   }
@@ -4057,7 +4057,7 @@ bool SomfyShadeController::toJSONGroups(JsonArray &arr) {
   for(uint8_t i = 0; i < SOMFY_MAX_GROUPS; i++) {
     SomfyGroup &group = this->groups[i];
     if(group.getGroupId() != 255) {
-      JsonObject ogroup = arr.createNestedObject();
+      JsonObject ogroup = arr.add<JsonObject>();
       group.toJSON(ogroup);
     }
   }
@@ -4577,7 +4577,7 @@ void Transceiver::disableReceive(void) {
 /*
 bool Transceiver::toJSON(JsonObject& obj) {
     //Serial.println("Setting Transceiver Json");
-    JsonObject objConfig = obj.createNestedObject("config");
+    JsonObject objConfig = obj["config"].to<JsonObject>();
     this->config.toJSON(objConfig);
     return true;
 }

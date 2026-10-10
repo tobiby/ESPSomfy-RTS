@@ -2475,13 +2475,13 @@ void Web::begin() {
     JsonObject obj = doc.to<JsonObject>();
     settings.toJSON(obj);
     obj["fwVersion"] = settings.fwVersion.name;
-    JsonObject eth = obj.createNestedObject("ethernet");
+    JsonObject eth = obj["ethernet"].to<JsonObject>();
 #ifndef CONFIG_IDF_TARGET_ESP32C6
     settings.Ethernet.toJSON(eth);
 #endif
-    JsonObject wifi = obj.createNestedObject("wifi");
+    JsonObject wifi = obj["wifi"].to<JsonObject>();
     settings.WIFI.toJSON(wifi);
-    JsonObject ip = obj.createNestedObject("ip");
+    JsonObject ip = obj["ip"].to<JsonObject>();
     settings.IP.toJSON(ip);
     serializeJson(doc, g_async_content, sizeof(g_async_content));
     request->send(200, _encoding_json, g_async_content);
