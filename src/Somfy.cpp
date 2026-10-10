@@ -3928,6 +3928,13 @@ bool SomfyShadeController::deleteGroup(uint8_t groupId) {
 
 bool SomfyShadeController::loadShadesFile(const char *filename) { return ShadeConfigFile::load(this, filename); }
 uint16_t SomfyRemote::getNextRollingCode() {
+  // Do not advance the rolling code while the radio is not initialized: nothing is
+  // transmitted, so the stored code would drift ahead of the motor and desync the remote.
+  // (upstream PR rstrouse/ESPSomfy-RTS#679)
+  if(!somfy.transceiver.config.radioInit) {
+    ESP_LOGW(TAG, "Radio not initialized - rolling code NOT incremented");
+    return this->lastRollingCode > 0 ? this->lastRollingCode : 1;
+  }
   if(!pref.begin("ShadeCodes")) {
     ESP_LOGE(TAG, "getNextRollingCode() pref.begin(ShadeCodes) FAILED");
   }
@@ -4138,6 +4145,11 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
     //delayMicroseconds(9565);
     //delay(80);
   }
+  // Network tasks (WiFi, lwIP, AsyncTCP @ prio 10 on any core) can preempt the loop task
+  // mid-frame and delay an edge enough to corrupt the frame. Bump the priority until the
+  // last data bit, then restore it. (upstream PR rstrouse/ESPSomfy-RTS#690)
+  const UBaseType_t txPriority = uxTaskPriorityGet(NULL);
+  vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
   // Depending on the bitness of the protocol we will be sending a different hwsync.
   // 56-bit 2 pulses for the first frame and 7 for the repeats
   // 80-bit 24 pulses for the first frame and 14 pulses for the repeats
@@ -4172,6 +4184,7 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
       last_bit = 0;
     }
   }
+  vTaskPrioritySet(NULL, txPriority);
   // End with a 0 no matter what.  This accommodates the 56-bit protocol by telling the
   // motor that there are no more follow on bits.
   if(last_bit == 0) {
@@ -4782,14 +4795,28 @@ void transceiver_config_t::apply() {
     somfy.transceiver.disableReceive();
     bit_length = this->type;    
     if(this->enabled) {
-      bool radioInit = true;
       pref.begin("CC1101");
-      radioInit = pref.getBool("radioInit", true);
-      // If the radio locks up then we can simply reboot and re-enable the radio.
-      pref.putBool("radioInit", false);
+      bool radioInit = pref.getBool("radioInit", true);
+      uint8_t initCrashes = pref.getUChar("initCrashes", 0);
+      // If a previous boot hung during CC1101 init the flag was left false and the original
+      // code skipped radio init on EVERY following boot. Retry up to 3 consecutive times
+      // before giving up. (upstream PR rstrouse/ESPSomfy-RTS#679)
+      if(!radioInit) {
+        initCrashes++;
+        if(initCrashes >= 3) {
+          pref.putUChar("initCrashes", initCrashes);
+          pref.end();
+          this->radioInit = false;
+          ESP_LOGE(TAG, "CC1101 init skipped after %u consecutive crashes - save radio settings to reset", initCrashes);
+          return;
+        }
+        ESP_LOGW(TAG, "CC1101 init did not complete last boot (%u/3), retrying...", initCrashes);
+      }
+      else initCrashes = 0;
+      pref.putUChar("initCrashes", initCrashes);
+      pref.putBool("radioInit", false); // Mark init as in-progress; reset to true once it completes.
       this->radioInit = false;
       pref.end();
-      if(!radioInit) return;
       ESP_LOGD(TAG, "Applying radio settings - Setting Data Pins RX:%u TX:%u", this->RXPin, this->TXPin);
       //if(this->TXPin != this->RXPin)
       //  pinMode(this->TXPin, OUTPUT);
@@ -4847,8 +4874,8 @@ void transceiver_config_t::apply() {
       }
       pref.begin("CC1101");
       pref.putBool("radioInit", true);
+      pref.putUChar("initCrashes", 0); // Init completed - clear the crash counter.
       pref.end();
-      
     }
     else {
       if(this->radioInit) ELECHOUSE_cc1101.setSidle();
