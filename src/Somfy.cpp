@@ -12,6 +12,22 @@
 #include "MQTT.h"
 #include "ConfigFile.h"
 #include "GitOTA.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+static SemaphoreHandle_t g_somfyMutex = nullptr;
+void SomfyLock::init() {
+  if(!g_somfyMutex) g_somfyMutex = xSemaphoreCreateRecursiveMutex();
+}
+SomfyLock::SomfyLock() {
+  if(!g_somfyMutex) return;
+  // Bounded wait so a stuck holder can never trip the task watchdog of the waiter.
+  this->m_locked = xSemaphoreTakeRecursive(g_somfyMutex, pdMS_TO_TICKS(5000)) == pdTRUE;
+  if(!this->m_locked) ESP_LOGE("SomfyLock", "Timeout waiting for somfy lock - continuing unlocked");
+}
+SomfyLock::~SomfyLock() {
+  if(this->m_locked) xSemaphoreGiveRecursive(g_somfyMutex);
+}
 
 static const char *TAG = "Somfy";
 
@@ -603,6 +619,7 @@ bool SomfyShadeController::begin() {
 }
 void SomfyShadeController::commit() {
   if(git.lockFS) return;
+  SomfyLock lock;
   esp_task_wdt_reset(); // Make sure we don't reset inadvertently.
   ShadeConfigFile file;
   file.begin();
@@ -699,6 +716,7 @@ void SomfyGroup::clear() {
   memset(&this->linkedShades, 0x00, sizeof(this->linkedShades));
 }
 bool SomfyShade::linkRemote(uint32_t address, uint16_t rollingCode) {
+  SomfyLock lock;
   // Check to see if the remote is already linked. If it is
   // just return true after setting the rolling code
   for(uint8_t i = 0; i < SOMFY_MAX_LINKED_REMOTES; i++) {
@@ -790,6 +808,7 @@ void SomfyShade::commitTiltPosition() {
   #endif
 }
 bool SomfyShade::unlinkRemote(uint32_t address) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_LINKED_REMOTES; i++) {
     if(this->linkedRemotes[i].getRemoteAddress() == address) {
       this->linkedRemotes[i].setRemoteAddress(0);
@@ -3047,6 +3066,7 @@ void SomfyShade::moveToTarget(float pos, float tilt) {
   }
 }
 bool SomfyShade::save() {
+  SomfyLock lock;
   #ifdef USE_NVS
   if(somfy.useNVS()) {
     char shadeKey[15];
@@ -3271,7 +3291,8 @@ int8_t SomfyShade::fromJSON(JsonObject &obj) {
         this->linkedRemotes[j].setRemoteAddress(linkedAddresses[j]);
       }
     }
-    if(!obj["flags"].isNull()) this->flags = obj["flags"];
+    // Configured flags come from the client, live sensor state (wind/sun/demo) stays as received.
+    if(!obj["flags"].isNull()) this->flags = (obj["flags"].as<uint8_t>() & ~SOMFY_TRANSIENT_FLAGS) | (this->flags & SOMFY_TRANSIENT_FLAGS);
     if(this->proto == radio_proto::GP_Remote || this->proto == radio_proto::GP_Relay) {
       if(!obj["gpioUp"].isNull()) this->gpioUp = obj["gpioUp"];
       if(!obj["gpioDown"].isNull()) this->gpioDown = obj["gpioDown"];
@@ -3415,6 +3436,7 @@ bool SomfyRemote::toJSON(JsonObject &obj) {
 void SomfyRemote::setRemoteAddress(uint32_t address) { this->m_remoteAddress = address; snprintf(this->m_remotePrefId, sizeof(this->m_remotePrefId), "_%lu", (unsigned long)this->m_remoteAddress); }
 uint32_t SomfyRemote::getRemoteAddress() { return this->m_remoteAddress; }
 void SomfyShadeController::processFrame(somfy_frame_t &frame, bool internal) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_SHADES; i++) {
     if(this->shades[i].getShadeId() != 255) this->shades[i].processFrame(frame, internal);
   }
@@ -3595,6 +3617,7 @@ uint32_t SomfyShadeController::getNextRemoteAddress(uint8_t id) {
   return address;
 }
 SomfyShade *SomfyShadeController::addShade(JsonObject &obj) {
+  SomfyLock lock;
   SomfyShade *shade = this->addShade();
   if(shade) {
     shade->fromJSON(obj);
@@ -3604,6 +3627,7 @@ SomfyShade *SomfyShadeController::addShade(JsonObject &obj) {
   return shade;
 }
 SomfyShade *SomfyShadeController::addShade() {
+  SomfyLock lock;
   uint8_t shadeId = this->getNextShadeId();
   // So the next shade id will be the first one we run into with an id of 255 so
   // if it gets deleted in the middle then it will get the first slot that is empty.
@@ -3673,6 +3697,7 @@ SomfyShade *SomfyShadeController::addShade() {
   return shade;
 }
 bool SomfyShadeController::unlinkRepeater(uint32_t address) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_REPEATERS; i++) {
     if(this->repeaters[i] == address) this->repeaters[i] = 0;
   }
@@ -3681,6 +3706,7 @@ bool SomfyShadeController::unlinkRepeater(uint32_t address) {
   return true;  
 }
 bool SomfyShadeController::linkRepeater(uint32_t address) {
+  SomfyLock lock;
   bool bSet = false;
   for(uint8_t i = 0; i < SOMFY_MAX_REPEATERS; i++) {
     if(!bSet && this->repeaters[i] == address) bSet = true;
@@ -3764,6 +3790,7 @@ somfy_commands SomfyRemote::transformCommand(somfy_commands cmd) {
   return cmd;
 }
 void SomfyRemote::sendSensorCommand(int8_t isWindy, int8_t isSunny, uint8_t repeat) {
+  SomfyLock lock;
   uint8_t flags = (this->flags >> 4) & 0x0F;
   if(isWindy > 0) flags |= 0x01;
   if(isSunny > 0) flags |= 0x02;
@@ -3786,7 +3813,18 @@ void SomfyRemote::sendSensorCommand(int8_t isWindy, int8_t isSunny, uint8_t repe
 }
 void SomfyRemote::sendCommand(somfy_commands cmd) { this->sendCommand(cmd, this->repeats); }
 void SomfyRemote::sendCommand(somfy_commands cmd, uint8_t repeat, uint8_t stepSize) {
-  this->lastFrame.rollingCode = this->getNextRollingCode();
+  // Hold the lock for the whole command so the rolling code increment, the transmission and
+  // the frame processing cannot interleave with another task.
+  SomfyLock lock;
+  const uint16_t rollingCode = this->getNextRollingCode();
+  if(rollingCode == 0) {
+    // Never transmit code 0 (or a reset counter): the motor would ignore it and the stored
+    // rolling code would no longer match. getNextRollingCode() already logged the cause.
+    ESP_LOGE(TAG, "CMD:%s ADDR:%d not sent - no valid rolling code",
+        translateSomfyCommand(this->transformCommand(cmd)).c_str(), this->getRemoteAddress());
+    return;
+  }
+  this->lastFrame.rollingCode = rollingCode;
   this->lastFrame.remoteAddress = this->getRemoteAddress();
   this->lastFrame.cmd = this->transformCommand(cmd);
   this->lastFrame.repeats = repeat;
@@ -3797,7 +3835,6 @@ void SomfyRemote::sendCommand(somfy_commands cmd, uint8_t repeat, uint8_t stepSi
   this->lastFrame.encKey = 0xA0 | static_cast<uint8_t>(this->lastFrame.rollingCode & 0x000F);
   this->lastFrame.proto = this->proto;
   if(this->lastFrame.bitLength == 0) this->lastFrame.bitLength = bit_length;
-  if(this->lastFrame.rollingCode == 0) ESP_LOGE(TAG, "Setting rcode to 0");
   this->p_lastRollingCode(this->lastFrame.rollingCode);
   // We have to set the processed to clear this if we are sending
   // another command.
@@ -3829,6 +3866,7 @@ bool SomfyRemote::isLastCommand(somfy_commands cmd) {
   return true;
 }
 void SomfyRemote::repeatFrame(uint8_t repeat) {
+  SomfyLock lock;
   if(this->proto == radio_proto::GP_Relay)
     return;
   else if(this->proto == radio_proto::GP_Remote) {
@@ -3850,6 +3888,7 @@ void SomfyRemote::repeatFrame(uint8_t repeat) {
   //somfy.processFrame(this->lastFrame, true);
 }
 void SomfyShadeController::sendFrame(somfy_frame_t &frame, uint8_t repeat) {
+  SomfyLock lock;
   somfy.transceiver.beginTransmit();
   byte frm[10];
   frame.encodeFrame(frm);
@@ -3864,6 +3903,7 @@ void SomfyShadeController::sendFrame(somfy_frame_t &frame, uint8_t repeat) {
   this->transceiver.endTransmit();
 }
 bool SomfyShadeController::deleteShade(uint8_t shadeId) {
+  SomfyLock lock;
   for(uint8_t i = 0; i < SOMFY_MAX_SHADES; i++) {
     if(this->shades[i].getShadeId() == shadeId) {
       shades[i].emitState("shadeRemoved");
@@ -3935,12 +3975,20 @@ uint16_t SomfyRemote::getNextRollingCode() {
     ESP_LOGW(TAG, "Radio not initialized - rolling code NOT incremented");
     return this->lastRollingCode > 0 ? this->lastRollingCode : 1;
   }
+  SomfyLock lock; // The global Preferences object is shared with other NVS users.
   if(!pref.begin("ShadeCodes")) {
-    ESP_LOGE(TAG, "getNextRollingCode() pref.begin(ShadeCodes) FAILED");
+    // Without NVS we would read 0 and transmit code 1, desyncing the remote. Refuse instead.
+    ESP_LOGE(TAG, "getNextRollingCode() pref.begin(ShadeCodes) FAILED - command not sent");
+    return 0;
   }
   uint16_t code = pref.getUShort(this->m_remotePrefId, 0);
   code++;
-  pref.putUShort(this->m_remotePrefId, code);
+  if(code == 0) code = 1; // 16-bit wrap: 0 is never a valid rolling code.
+  if(pref.putUShort(this->m_remotePrefId, code) == 0) {
+    pref.end();
+    ESP_LOGE(TAG, "getNextRollingCode() failed to persist rolling code %u - command not sent", code);
+    return 0;
+  }
   pref.end();
   this->p_lastRollingCode(code);
   //Serial.printf("Getting Next Rolling code %d\n", this->lastRollingCode);
@@ -3952,6 +4000,7 @@ uint16_t SomfyRemote::p_lastRollingCode(uint16_t code) {
   return old;
 }
 uint16_t SomfyRemote::setRollingCode(uint16_t code) {
+  SomfyLock lock;
   if(this->lastRollingCode != code) {
     pref.begin("ShadeCodes");
     pref.putUShort(this->m_remotePrefId, code);

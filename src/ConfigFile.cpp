@@ -824,7 +824,7 @@ bool ShadeConfigFile::readShadeRecord(SomfyShade *shade) {
     if(this->header.version < 5 && j == 4) break; // Prior to version 5 we only supported 5 linked remotes.
   }
   shade->lastRollingCode = this->readUInt16(0);
-  if(this->header.version > 7) shade->flags = this->readUInt8(0);
+  if(this->header.version > 7) shade->flags = this->readUInt8(0) & ~SOMFY_TRANSIENT_FLAGS;
   if(shade->getRemoteAddress() != 0) {
     // If the last rolling code stored on the nvs is less than the rc we currently have
     // then we need to set it.
@@ -992,7 +992,7 @@ bool ShadeConfigFile::writeShadeRecord(SomfyShade *shade) {
   }
   this->writeUInt16(shade->lastRollingCode);
   if(shade->getShadeId() != 255) {
-    this->writeUInt8(shade->flags & 0xFF);
+    this->writeUInt8(shade->flags & ~SOMFY_TRANSIENT_FLAGS & 0xFF);
     this->writeFloat(shade->myPos, 5);
     this->writeFloat(shade->myTiltPos, 5);
     this->writeFloat(shade->currentPos, 5);

@@ -45,6 +45,7 @@ void listDir(const char *dirname, uint8_t levels) {
 }
 
 void setup() {  
+  SomfyLock::init(); // Must exist before the web server task can touch shade state.
   Serial.begin(115200);
   ESP_LOGI(TAG, "Startup/Boot....");
   esp_core_dump_summary_t summary;
@@ -114,7 +115,10 @@ void loop() {
   if(millis() - timing > 100) ESP_LOGD(TAG, "Timing Net: %ldms", millis() - timing);
   timing = millis();
   esp_task_wdt_reset();
-  somfy.loop();
+  {
+    SomfyLock lock; // Keep web server task changes out of the movement/RX/TX processing.
+    somfy.loop();
+  }
   if(millis() - timing > 100) ESP_LOGD(TAG, "Timing Somfy: %ldms", millis() - timing);
   timing = millis();
   esp_task_wdt_reset();
@@ -123,7 +127,10 @@ void loop() {
       git.loop();
       esp_task_wdt_reset();
     }
-    webServer.loop();
+    {
+      SomfyLock lock; // Queued web commands transmit and change shade state.
+      webServer.loop();
+    }
     esp_task_wdt_reset();
     if(millis() - timing > 100) ESP_LOGD(TAG, "Timing WebServer: %ldms", millis() - timing);
     esp_task_wdt_reset();

@@ -3,6 +3,20 @@
 #include "ConfigSettings.h"
 #include "WResp.h"
 
+// Serializes access to shade/group state, the radio, NVS (the shared global Preferences
+// object) and the config file between the Arduino loop task and the AsyncTCP web server
+// task. Recursive, so nested calls from the same task are fine.
+class SomfyLock {
+  public:
+    SomfyLock();
+    ~SomfyLock();
+    SomfyLock(const SomfyLock&) = delete;
+    SomfyLock& operator=(const SomfyLock&) = delete;
+    static void init();
+  private:
+    bool m_locked = false;
+};
+
 #define SOMFY_MAX_SHADES 32
 #define SOMFY_MAX_GROUPS 16
 #define SOMFY_MAX_LINKED_REMOTES 7
@@ -163,6 +177,12 @@ enum class somfy_flags_t : byte {
     Lighted = 0x40,
     SimMy = 0x80
 };
+// Sensor state reported over the air (wind/sun/demo). It is only valid until the next sensor
+// frame and must never be persisted, otherwise a stale "windy" survives every reboot.
+static constexpr uint8_t SOMFY_TRANSIENT_FLAGS =
+    static_cast<uint8_t>(somfy_flags_t::Windy) |
+    static_cast<uint8_t>(somfy_flags_t::Sunny) |
+    static_cast<uint8_t>(somfy_flags_t::DemoMode);
 enum class gpio_flags_t : byte {
   LowLevelTrigger = 0x01
 };

@@ -1519,6 +1519,7 @@ void Web::begin() {
       if(!obj["roomId"].isNull()) {
         SomfyRoom* room = somfy.getRoomById(obj["roomId"]);
         if(room) {
+          SomfyLock lock;
           room->fromJSON(obj);
           room->save();
           AsyncJsonResp resp;
@@ -1541,6 +1542,7 @@ void Web::begin() {
       if(!obj["shadeId"].isNull()) {
         SomfyShade* shade = somfy.getShadeById(obj["shadeId"]);
         if(shade) {
+          SomfyLock lock; // Config change from the web server task.
           int8_t err = shade->fromJSON(obj);
           if(err == 0) {
             shade->save();
@@ -1569,6 +1571,7 @@ void Web::begin() {
       if(!obj["groupId"].isNull()) {
         SomfyGroup* group = somfy.getGroupById(obj["groupId"]);
         if(group) {
+          SomfyLock lock;
           group->fromJSON(obj);
           group->save();
           AsyncJsonResp resp;
