@@ -2902,8 +2902,11 @@ class Somfy {
         //console.log(frame);
         document.getElementById('spanRssi').innerHTML = frame.rssi;
         document.getElementById('spanFrameCount').innerHTML = parseInt(document.getElementById('spanFrameCount').innerHTML, 10) + 1;
+        // Only link remotes/repeaters from frames the firmware decoded as valid. Corrupted frames
+        // (e.g. a sensor transmitting hard during a wind alarm) otherwise produce random addresses.
+        const frameValid = frame.valid === true;
         let lnk = document.getElementById('divLinking');
-        if (lnk) {
+        if (lnk && frameValid) {
             let obj = {
                 shadeId: parseInt(lnk.dataset.shadeid, 10),
                 remoteAddress: frame.address,
@@ -2919,7 +2922,7 @@ class Somfy {
         }
         else {
             lnk = document.getElementById('divLinkRepeater');
-            if (lnk) {
+            if (lnk && frameValid) {
                 putJSONSync(`/linkRepeater`, {address:frame.address}, (err, repeaters) => {
                     lnk.remove();
                     if (err) ui.serviceError(err);
