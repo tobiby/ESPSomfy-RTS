@@ -1112,7 +1112,7 @@ void SomfyShade::checkMovement() {
   uint8_t currPos = floor(this->currentPos);
   uint8_t currTiltPos = floor(this->currentTiltPos);
   if(this->direction != 0) this->lastMovement = this->direction;
-  if (sunFlag) {
+  if (SOMFY_SIMULATE_SENSOR_MOVES && sunFlag) {
     if (isSunny && !isWindy) {  // It is sunny and there is no wind so we should be extended
       if (this->noWindDone
           && !this->sunDone
@@ -1146,7 +1146,8 @@ void SomfyShade::checkMovement() {
     }
   }
 
-  if (isWindy
+  if (SOMFY_SIMULATE_SENSOR_MOVES
+      && isWindy
       && !this->windDone
       && this->windStart
       && (curTime - this->windStart) >= SOMFY_WIND_TIMEOUT)
@@ -2270,7 +2271,7 @@ void SomfyShade::processFrame(somfy_frame_t &frame, bool internal) {
         {
           this->noWindStart = 0;
           this->noWindDone = true;
-          this->windLast = curTime;
+          if(SOMFY_SIMULATE_SENSOR_MOVES) this->windLast = curTime;
         }
         else
         {
