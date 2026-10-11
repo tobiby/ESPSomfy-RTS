@@ -225,6 +225,10 @@ void somfy_frame_t::decodeFrame(byte* frame) {
     this->remoteAddress = (decoded[6] + (decoded[5] << 8) + (decoded[4] << 16));
     this->valid = this->checksum == checksum && this->remoteAddress > 0 && this->remoteAddress < 16777215;
     if (this->cmd != somfy_commands::Sensor && this->valid) this->valid = (this->rollingCode > 0);
+    // Sensor frames carry their status (wind/sun/demo) in the low bits of the rolling code
+    // field; everything above is always 0. With only a 4-bit checksum, corrupted frames slip
+    // through as "valid" and set random wind/sun flags, so reject impossible values.
+    if (this->cmd == somfy_commands::Sensor && this->valid) this->valid = (this->rollingCode <= 0x0F);
     // Next lets process some of the RTS extensions for 80-bit frames
     if(this->valid && this->proto == radio_proto::RTS && this->bitLength == 80) {
       // Do a parity checksum on the 80 bit data.
@@ -2226,6 +2230,9 @@ void SomfyShade::processFrame(somfy_frame_t &frame, bool internal) {
     case somfy_commands::Sensor:
       this->lastFrame.processed = true;
       if(this->shadeType == shade_types::drycontact || this->shadeType == shade_types::drycontact2) return;
+      // A sensor transmits every status several times in a row. Only act once the same status
+      // has been received twice, so a single corrupted frame cannot raise a wind alarm.
+      if(!internal && this->lastFrame.repeats < 1) return;
       {
         const uint8_t prevFlags = this->flags;
         const bool wasSunny = prevFlags & static_cast<uint8_t>(somfy_flags_t::Sunny);
