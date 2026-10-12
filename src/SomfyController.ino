@@ -47,7 +47,7 @@ void listDir(const char *dirname, uint8_t levels) {
 void setup() {  
   SomfyLock::init(); // Must exist before the web server task can touch shade state.
   Serial.begin(115200);
-  ESP_LOGI(TAG, "Startup/Boot....");
+  ESP_LOGI(TAG, "Startup/Boot.... firmware %s (%s)", FW_VERSION, FW_GIT_REV);
   esp_core_dump_summary_t summary;
   if (esp_core_dump_get_summary(&summary) == ESP_OK) {
     ESP_LOGW(TAG, "*** Previous crash coredump found ***");

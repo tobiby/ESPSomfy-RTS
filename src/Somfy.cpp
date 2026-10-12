@@ -15,19 +15,51 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-static SemaphoreHandle_t g_somfyMutex = nullptr;
+// Recursive lock built on a binary semaphore. A FreeRTOS mutex would apply priority
+// inheritance, and vTaskPrioritySet() on a task that is inheriting only changes its base
+// priority - the TX priority boost would silently not apply and the restored priority
+// could stick at the inherited value.
+static SemaphoreHandle_t g_somfySem = nullptr;
+static volatile TaskHandle_t g_somfyOwner = nullptr;
+static uint32_t g_somfyDepth = 0;
 void SomfyLock::init() {
-  if(!g_somfyMutex) g_somfyMutex = xSemaphoreCreateRecursiveMutex();
+  if(!g_somfySem) {
+    g_somfySem = xSemaphoreCreateBinary();
+    xSemaphoreGive(g_somfySem);
+  }
 }
 SomfyLock::SomfyLock() {
-  if(!g_somfyMutex) return;
+  if(!g_somfySem) return;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if(g_somfyOwner == self) { g_somfyDepth++; this->m_locked = true; return; }
   // Bounded wait so a stuck holder can never trip the task watchdog of the waiter.
-  this->m_locked = xSemaphoreTakeRecursive(g_somfyMutex, pdMS_TO_TICKS(5000)) == pdTRUE;
-  if(!this->m_locked) ESP_LOGE("SomfyLock", "Timeout waiting for somfy lock - continuing unlocked");
+  if(xSemaphoreTake(g_somfySem, pdMS_TO_TICKS(5000)) == pdTRUE) {
+    g_somfyOwner = self;
+    g_somfyDepth = 1;
+    this->m_locked = true;
+  }
+  else ESP_LOGE("SomfyLock", "Timeout waiting for somfy lock - continuing unlocked");
 }
 SomfyLock::~SomfyLock() {
-  if(this->m_locked) xSemaphoreGiveRecursive(g_somfyMutex);
+  if(!this->m_locked) return;
+  if(--g_somfyDepth == 0) {
+    g_somfyOwner = nullptr;
+    xSemaphoreGive(g_somfySem);
+  }
 }
+// Raises the calling task above WiFi/lwIP/AsyncTCP for a complete transmission: all frames
+// AND the inter-frame silences. Somfy motors only treat the repeats as one continuous
+// (long) button press if the gaps are exact; stretched gaps look like separate short
+// presses, which venetian blind motors answer with a single slat-tilt step.
+class SomfyTxBoost {
+  public:
+    SomfyTxBoost() : m_prio(uxTaskPriorityGet(NULL)) { vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1); }
+    ~SomfyTxBoost() { vTaskPrioritySet(NULL, this->m_prio); }
+    SomfyTxBoost(const SomfyTxBoost&) = delete;
+    SomfyTxBoost& operator=(const SomfyTxBoost&) = delete;
+  private:
+    UBaseType_t m_prio;
+};
 
 static const char *TAG = "Somfy";
 
@@ -193,6 +225,10 @@ void somfy_frame_t::decodeFrame(byte* frame) {
     this->remoteAddress = (decoded[6] + (decoded[5] << 8) + (decoded[4] << 16));
     this->valid = this->checksum == checksum && this->remoteAddress > 0 && this->remoteAddress < 16777215;
     if (this->cmd != somfy_commands::Sensor && this->valid) this->valid = (this->rollingCode > 0);
+    // Sensor frames carry their status (wind/sun/demo) in the low bits of the rolling code
+    // field; everything above is always 0. With only a 4-bit checksum, corrupted frames slip
+    // through as "valid" and set random wind/sun flags, so reject impossible values.
+    if (this->cmd == somfy_commands::Sensor && this->valid) this->valid = (this->rollingCode <= 0x0F);
     // Next lets process some of the RTS extensions for 80-bit frames
     if(this->valid && this->proto == radio_proto::RTS && this->bitLength == 80) {
       // Do a parity checksum on the 80 bit data.
@@ -1076,7 +1112,7 @@ void SomfyShade::checkMovement() {
   uint8_t currPos = floor(this->currentPos);
   uint8_t currTiltPos = floor(this->currentTiltPos);
   if(this->direction != 0) this->lastMovement = this->direction;
-  if (sunFlag) {
+  if (SOMFY_SIMULATE_SENSOR_MOVES && sunFlag) {
     if (isSunny && !isWindy) {  // It is sunny and there is no wind so we should be extended
       if (this->noWindDone
           && !this->sunDone
@@ -1110,7 +1146,8 @@ void SomfyShade::checkMovement() {
     }
   }
 
-  if (isWindy
+  if (SOMFY_SIMULATE_SENSOR_MOVES
+      && isWindy
       && !this->windDone
       && this->windStart
       && (curTime - this->windStart) >= SOMFY_WIND_TIMEOUT)
@@ -2194,6 +2231,9 @@ void SomfyShade::processFrame(somfy_frame_t &frame, bool internal) {
     case somfy_commands::Sensor:
       this->lastFrame.processed = true;
       if(this->shadeType == shade_types::drycontact || this->shadeType == shade_types::drycontact2) return;
+      // A sensor transmits every status several times in a row. Only act once the same status
+      // has been received twice, so a single corrupted frame cannot raise a wind alarm.
+      if(!internal && this->lastFrame.repeats < 1) return;
       {
         const uint8_t prevFlags = this->flags;
         const bool wasSunny = prevFlags & static_cast<uint8_t>(somfy_flags_t::Sunny);
@@ -2231,7 +2271,7 @@ void SomfyShade::processFrame(somfy_frame_t &frame, bool internal) {
         {
           this->noWindStart = 0;
           this->noWindDone = true;
-          this->windLast = curTime;
+          if(SOMFY_SIMULATE_SENSOR_MOVES) this->windLast = curTime;
         }
         else
         {
@@ -3874,15 +3914,18 @@ void SomfyRemote::repeatFrame(uint8_t repeat) {
     return;
   }
   somfy.transceiver.beginTransmit();
-  byte frm[10];
-  this->lastFrame.encodeFrame(frm);
-  this->lastFrame.repeats++;
-  somfy.transceiver.sendFrame(frm, this->bitLength == 56 ? 2 : 12, this->bitLength);
-  for(uint8_t i = 0; i < repeat; i++) {
+  {
+    SomfyTxBoost boost;
+    byte frm[10];
+    this->lastFrame.encodeFrame(frm);
     this->lastFrame.repeats++;
-    if(this->lastFrame.bitLength == 80) this->lastFrame.encode80BitFrame(&frm[0], this->lastFrame.repeats);
-    somfy.transceiver.sendFrame(frm, this->bitLength == 56 ? 7 : 6, this->bitLength);
-    esp_task_wdt_reset();
+    somfy.transceiver.sendFrame(frm, this->bitLength == 56 ? 2 : 12, this->bitLength);
+    for(uint8_t i = 0; i < repeat; i++) {
+      this->lastFrame.repeats++;
+      if(this->lastFrame.bitLength == 80) this->lastFrame.encode80BitFrame(&frm[0], this->lastFrame.repeats);
+      somfy.transceiver.sendFrame(frm, this->bitLength == 56 ? 7 : 6, this->bitLength);
+      esp_task_wdt_reset();
+    }
   }
   somfy.transceiver.endTransmit();
   //somfy.processFrame(this->lastFrame, true);
@@ -3890,15 +3933,18 @@ void SomfyRemote::repeatFrame(uint8_t repeat) {
 void SomfyShadeController::sendFrame(somfy_frame_t &frame, uint8_t repeat) {
   SomfyLock lock;
   somfy.transceiver.beginTransmit();
-  byte frm[10];
-  frame.encodeFrame(frm);
-  this->transceiver.sendFrame(frm, frame.bitLength == 56 ? 2 : 12, frame.bitLength);
-  for(uint8_t i = 0; i < repeat; i++) {
-    // For each 80-bit frame we need to adjust the byte encoding for the
-    // silence.
-    if(frame.bitLength == 80) frame.encode80BitFrame(&frm[0], i + 1);
-    this->transceiver.sendFrame(frm, frame.bitLength == 56 ? 7 : 6, frame.bitLength);
-    esp_task_wdt_reset();
+  {
+    SomfyTxBoost boost;
+    byte frm[10];
+    frame.encodeFrame(frm);
+    this->transceiver.sendFrame(frm, frame.bitLength == 56 ? 2 : 12, frame.bitLength);
+    for(uint8_t i = 0; i < repeat; i++) {
+      // For each 80-bit frame we need to adjust the byte encoding for the
+      // silence.
+      if(frame.bitLength == 80) frame.encode80BitFrame(&frm[0], i + 1);
+      this->transceiver.sendFrame(frm, frame.bitLength == 56 ? 7 : 6, frame.bitLength);
+      esp_task_wdt_reset();
+    }
   }
   this->transceiver.endTransmit();
 }
@@ -4194,11 +4240,9 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
     //delayMicroseconds(9565);
     //delay(80);
   }
-  // Network tasks (WiFi, lwIP, AsyncTCP @ prio 10 on any core) can preempt the loop task
-  // mid-frame and delay an edge enough to corrupt the frame. Bump the priority until the
-  // last data bit, then restore it. (upstream PR rstrouse/ESPSomfy-RTS#690)
-  const UBaseType_t txPriority = uxTaskPriorityGet(NULL);
-  vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
+  // Timing-critical: callers hold a SomfyTxBoost for the whole transmission (frames and
+  // inter-frame silences). Boosting per frame only (upstream PR rstrouse/ESPSomfy-RTS#690)
+  // lets the starved network tasks run inside the silences, stretching them.
   // Depending on the bitness of the protocol we will be sending a different hwsync.
   // 56-bit 2 pulses for the first frame and 7 for the repeats
   // 80-bit 24 pulses for the first frame and 14 pulses for the repeats
@@ -4233,7 +4277,6 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
       last_bit = 0;
     }
   }
-  vTaskPrioritySet(NULL, txPriority);
   // End with a 0 no matter what.  This accommodates the 56-bit protocol by telling the
   // motor that there are no more follow on bits.
   if(last_bit == 0) {
@@ -5003,7 +5046,10 @@ void Transceiver::loop() {
         snprintf(frame_buf + fpos, sizeof(frame_buf) - fpos, "]");
         ESP_LOGD(TAG, "%s", frame_buf);
       }
-      this->sendFrame(tx.payload, tx.hwsync, tx.bit_length);
+      {
+        SomfyTxBoost boost;
+        this->sendFrame(tx.payload, tx.hwsync, tx.bit_length);
+      }
       tx_queue.delay_time = millis() + TX_QUEUE_DELAY;
       
       /*

@@ -33,6 +33,14 @@ class SomfyLock {
 #define SOMFY_WIND_TIMEOUT SECS_TO_MILLIS(2)
 #define SOMFY_NO_WIND_TIMEOUT MINS_TO_MILLIS(12)
 #define SOMFY_NO_WIND_REMOTE_TIMEOUT SECS_TO_MILLIS(30)
+// When 1, the firmware predicts the motor's own reaction to sensor status frames (retract on
+// wind, extend/retract on sun) and blocks lowering after wind. That only matches motors that
+// act on status frames themselves. Sensors such as the Eolis RTS instead send real commands
+// (Up+Down) to the motors, which are tracked like any remote. Predicting on top of that moves
+// the shade in the UI on every short gust while the motor stays put, so it is off by default.
+#ifndef SOMFY_SIMULATE_SENSOR_MOVES
+#define SOMFY_SIMULATE_SENSOR_MOVES 0
+#endif
 
 
 enum class radio_proto : byte { // Ordinal byte 0-255

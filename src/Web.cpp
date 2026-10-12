@@ -2458,6 +2458,7 @@ void Web::begin() {
     resp.beginResponse(request, g_async_content, sizeof(g_async_content));
     resp.beginObject();
     resp.addElem("fwVersion", settings.fwVersion.name);
+    resp.addElem("fwRev", FW_GIT_REV);
     resp.addElem("ssdpBroadcast", settings.ssdpBroadcast);
     resp.addElem("hostname", settings.hostname);
     resp.addElem("connType", static_cast<uint8_t>(settings.connType));
