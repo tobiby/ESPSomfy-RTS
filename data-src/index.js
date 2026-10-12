@@ -1300,6 +1300,28 @@ async function getAppVersion() {
     }
     return appVersion;
 }
+// Git revision of the web app (written by app_version.py at build time).
+async function getAppRev() {
+    try {
+        const response = await fetch('/apprev?v=' + Date.now());
+        if (!response.ok) return '';
+        return (await response.text()).trim();
+    } catch (error) {
+        return '';
+    }
+}
+let fwRev = '';
+let appRev = '';
+function updateRevDisplay() {
+    const spanFw = document.getElementById('spanFwVersion');
+    const spanApp = document.getElementById('spanAppVersion');
+    if (spanFw && fwRev && !spanFw.innerText.includes('(')) spanFw.innerText += ` (${fwRev})`;
+    if (spanApp && appRev && !spanApp.innerText.includes('(')) spanApp.innerText += ` (${appRev})`;
+    const mismatch = fwRev && appRev && fwRev !== appRev;
+    if (spanFw) spanFw.style.color = mismatch ? 'red' : '';
+    if (spanApp) spanApp.style.color = mismatch ? 'red' : '';
+    if (spanApp) spanApp.title = mismatch ? 'Firmware und Application stammen aus unterschiedlichen Builds' : '';
+}
 
 class General {
     initialized = false;
@@ -1447,6 +1469,8 @@ class General {
             else {
                 console.log(settings);
                 document.getElementById('spanFwVersion').innerText = settings.fwVersion;
+                fwRev = settings.fwRev || '';
+                updateRevDisplay();
                 document.getElementById('spanHwVersion').innerText = settings.chipModel.length > 0 ? '-' + settings.chipModel : '';
                 document.getElementById('divContainer').setAttribute('data-chipmodel', settings.chipModel);
                 somfy.initPins();
@@ -1483,6 +1507,8 @@ class General {
     async setAppVersion() {
         this.appVersion = await getAppVersion();
         document.getElementById('spanAppVersion').innerText = this.appVersion;
+        appRev = await getAppRev();
+        updateRevDisplay();
     }
     setTimeZones() {
         let dd = document.getElementById('selTimeZone');
@@ -4873,6 +4899,8 @@ window.addEventListener('load', async () => {
     appVersion = await getAppVersion();
     const spanAppVersion = document.getElementById('spanAppVersion');
     spanAppVersion.innerText = `${appVersion.trim()}`;
+    appRev = await getAppRev();
+    updateRevDisplay();
     
     console.log("Application fully loaded and version updated.");
 });
