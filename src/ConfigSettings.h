@@ -9,6 +9,9 @@
 #ifndef FW_VERSION
   #define FW_VERSION "v3.0.14" // Fallback if app_version.py script fails
 #endif
+#ifndef FW_GIT_REV
+  #define FW_GIT_REV "unknown" // Git commit, injected by app_version.py
+#endif
 
 enum class conn_types_t : byte {
     unset = 0x00,
